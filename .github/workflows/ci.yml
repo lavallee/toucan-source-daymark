@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      # Resolves daymark-core from its v0.4.0 tag (see pyproject.toml).
+      - run: uv sync --dev
+      - run: uv run ruff check src tests --output-format=github
+      - run: uv run ruff format --check src tests
+      - run: uv run pytest -q
+      - run: uv build
+      - name: Verify the installed console script
+        shell: bash
+        run: |
+          smoke_env="$RUNNER_TEMP/toucan-source-daymark-smoke"
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" "$GITHUB_WORKSPACE"/dist/*.whl
+          cd "$RUNNER_TEMP"
+          DAYMARK_DB="$RUNNER_TEMP/absent.sqlite3" "$smoke_env/bin/toucan-source-daymark" list
+          "$smoke_env/bin/toucan-source-daymark" --version
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - name: Audit workflow
+        run: uvx --from zizmor zizmor .github/workflows --offline --min-severity high --min-confidence high --format github

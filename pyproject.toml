@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "toucan-source-daymark"
+version = "0.1.0"
+description = "A Daymark project as a toucan plan source: boards, gantts and tables that write back"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Marc Lavallee"}]
+dependencies = [
+    "daymark-core @ git+https://github.com/lavallee/daymark@v0.4.0",
+]
+
+[project.scripts]
+toucan-source-daymark = "toucan_source_daymark.adapter:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8", "build>=1"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toucan_source_daymark"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/toucan_source_daymark", "tests", "README.md", "LICENSE", "CHANGELOG.md", "AGENTS.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

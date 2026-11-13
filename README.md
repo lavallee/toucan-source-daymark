@@ -1,0 +1,217 @@
+# toucan-source-daymark
+
+**A Daymark project as a toucan plan source.**
+
+[toucan](https://github.com/lavallee/toucan) is a browser canvas that can show a
+plan from a system of record as a board, a gantt chart, a timeline, a dependency
+graph or a table, and write back what a person drags. [Daymark](https://github.com/lavallee/daymark)
+is a task system on one SQLite file. This small adapter connects the two: toucan
+runs it as a command, it reads and writes Daymark, and neither project ships or
+depends on the other.
+
+What a person does on the canvas becomes an ordinary Daymark write, with Daymark's
+version check, idempotency and history: a card moved to another column sets its
+stage (and so its status), a bar dragged on a gantt sets its planned dates, a card
+dropped between two others sets its place in the project's order.
+
+## Install
+
+It needs Python 3.11 or newer and `daymark-core` 0.4.0 or newer.
+
+```sh
+uv tool install "toucan-source-daymark @ git+https://github.com/lavallee/toucan-source-daymark"
+toucan-source-daymark --version
+```
+
+`uv tool install` puts the executable in `~/.local/bin` together with its own copy
+of `daymark-core`. It opens the same database file as your `daymark` command:
+`--db PATH`, else `$DAYMARK_DB`, else Daymark's per-user database
+(`$XDG_DATA_HOME/daymark/daymark.sqlite3`). Unlike `daymark`, it does not look for
+a `.daymark/` folder above the working directory, because toucan runs it from
+somewhere unrelated; set `DAYMARK_DB` for a project database.
+
+It never creates a database and never upgrades one. If the file was written by a
+different Daymark release than the one it was installed with, it answers
+`unavailable` and says which Daymark the file needs; upgrade the tool
+(`uv tool upgrade toucan-source-daymark`) or open the file once with your
+`daymark` command.
+
+## How toucan finds it
+
+toucan looks on `PATH` for executables named `toucan-source-NAME`; this one is the
+`daymark` source. It trusts one only from an absolute `PATH` folder outside
+toucan's own root and data directory **that is not group- or world-writable**, the
+same rule it applies to `toucan-profiles-NAME`. `~/.local/bin` normally qualifies;
+check with `ls -ld ~/.local/bin` (no `w` for group or others). Then:
+
+```sh
+toucan sources                       # lists daymark and its projects
+toucan --canvas C plan bind daymark home/site
+toucan --canvas C plan view add board --group-by stage
+```
+
+## The protocol
+
+This is the `toucan.plan/1` protocol as this adapter implements it. toucan's
+documentation is the canonical source.
+
+```
+toucan-source-daymark list                      -> {"sources": [{"ref", "title", "description"?, "readonly"}]}
+toucan-source-daymark read REF                  -> a plan
+toucan-source-daymark changes REF --after CUR   -> {"cursor": CUR2, "changed": true|false}
+toucan-source-daymark write REF   < changes     -> results
+```
+
+JSON on standard output and exit 0. On failure: a non-zero exit and one JSON
+object on standard error, `{"error": CODE, "message": TEXT}`, where `CODE` is
+`not_found` (exit 3), `conflict` (4), `invalid` (5), `forbidden` (7) or
+`unavailable` (1).
+
+A reference is `WORKSPACE/PROJECT_ID`, split at the first `/`. A Daymark workspace
+is a hard boundary: a reference reads and writes only its own.
+
+### A plan
+
+```json
+{
+  "plan": 1,
+  "source": {"ref": "home/site", "title": "Website relaunch", "description": "", "readonly": false},
+  "cursor": "184",
+  "fields": [
+    {"id": "stage", "label": "Stage", "type": "option", "writable": true,
+     "options": [{"id": "todo", "label": "To do", "color": "grey"},
+                 {"id": "done", "label": "Done", "color": "green", "done": true}]},
+    {"id": "field:points", "label": "Points", "type": "number", "writable": true}
+  ],
+  "items": [
+    {"id": "dm-ab12", "version": 3, "title": "Draft the sitemap", "detail": null,
+     "stage": "todo", "assignee": "ada", "start": "2030-04-10", "end": "2030-04-20",
+     "deadline": null, "priority": "2", "labels": [], "dependsOn": [], "parent": null,
+     "milestone": "beta", "isMilestone": false, "goal": null, "type": "story",
+     "done": false, "estimate": 240, "url": null, "status": "open", "field:points": 3}
+  ]
+}
+```
+
+- `items` are the project's tasks in its manual order. `version` changes on every
+  write and is what an update must quote. `null` means unset.
+- Field types: `text`, `option`, `options`, `date`, `number`, `bool`. An option's
+  `color` is one of toucan's colour names; `done: true` marks a finished option.
+  `writable: false` means do not offer or attempt to write it.
+- `source.readonly: true` means no writes at all.
+- `cursor` is the event cursor at the moment of the read; `changes --after` it
+  misses nothing.
+
+A proposed task (a suggestion awaiting a person's decision in Daymark) is not an
+item: it is not work yet. A cancelled task is an item only if the project has a
+cancelled stage.
+
+### Changes
+
+```json
+{"cursor": "187", "changed": true}
+```
+
+Whether anything the plan shows changed after the cursor: the project, its tasks,
+tasks entering or leaving it, what its tasks depend on outside it, its goal, or a
+person, label or goal it can name. It is one indexed query, cheap enough to ask
+every few seconds. A cursor from the future (after a restore) answers `true`.
+
+### Write
+
+```json
+{"changes": [
+  {"op": "update", "id": "dm-ab12", "version": 3, "mutation": "c0ffee",
+   "set": {"stage": "done", "end": "2030-12-03"}, "place": {"after": "dm-zz01"}},
+  {"op": "create", "mutation": "f00d", "set": {"title": "New card", "stage": "todo"},
+   "place": {"after": null}}
+]}
+```
+
+answers
+
+```json
+{"cursor": "189", "results": [
+  {"mutation": "c0ffee", "ok": true, "item": {"...": "the item as it now stands"}},
+  {"mutation": "f00d", "ok": false, "error": "conflict", "message": "Changed upstream",
+   "item": {"...": "the item as it now stands"}}
+]}
+```
+
+- `set` carries only changed fields, in the plan's ids and value forms; `null`
+  clears one.
+- `place: {"after": ID}` puts the item directly after another; `{"after": null}`
+  puts it first. `{"before": ID}` and `{"before": null}` (last) also work. Without
+  `place`, a new item goes last.
+- `mutation` is an idempotency key, scoped to the project. Sending the same change
+  again writes nothing and answers with the item as it stands. Sending a different
+  change under a mutation already used answers `conflict`.
+- A change's field update and its placement are one transaction. Changes are
+  independent of each other: one failing does not stop the rest.
+- There is no delete. Removing work is a decision made in Daymark (`daymark
+  cancel`, `daymark archive`).
+
+## Field mapping
+
+| Plan field | Type | Daymark | Notes |
+| --- | --- | --- | --- |
+| `title` | text | `title` | |
+| `detail` | text | `description` | empty reads as `null` |
+| `stage` | option | `stage` | options are the project's stages; writing one sets the task's status to that stage's status |
+| `assignee` | option | `assignee_id` | options are the workspace's people |
+| `start` | date | `planned`, else `earliest_start` | writing sets `planned` |
+| `end` | date | `latest_target`, else `deadline` | writing sets `latest_target`; never moves a deadline |
+| `deadline` | date | `deadline` | written only when written as itself; a timed deadline keeps its time |
+| `priority` | option | `priority` | `"1"` (highest) to `"4"`; `null` is unset |
+| `labels` | options | `label_ids` | options are the workspace's labels |
+| `dependsOn` | options (`items: true`) | `depends_on` | only dependencies inside the project; writing keeps the others |
+| `parent` | option (`items: true`) | `parent_id` | labelled with the project's container type (for example "Epic") if it has one |
+| `milestone` | option | `milestone_id` | the milestone the item counts toward; options are the project's milestones |
+| `isMilestone` | bool | `milestone` | whether the item is itself a milestone |
+| `goal` | option | `goal_id` | options are the workspace's goals |
+| `type` | option | `type` | only when the project declares types |
+| `done` | bool | `status` | true completes; false reopens a completed or cancelled item |
+| `estimate` | number | `estimate_minutes` | minutes |
+| `status` | option, read-only | `status` | open, waiting, completed, cancelled |
+| `url` | | | always `null` |
+| `field:ID` | per type | `values[ID]` | each field the project declares: text, url → text; number; bool; date; option; options; person → option of people. A number field may carry `unit`. |
+
+`items: true`, `unit`, `source.managedBy` and the list's `readonly` go beyond the
+base protocol; a reader may ignore them. Roll-ups (progress, health, milestone and
+parent summaries) are not part of the protocol; read them from Daymark itself
+(`daymark plan`, `GET /v1/projects/{id}/plan`).
+
+### Dates
+
+Writing `start` or `end` sets Daymark's movable dates (`planned`, `latest_target`)
+and never its hard `deadline`. Only the dates a change sets are checked: a start
+after an end is refused with `invalid`, never adjusted. A date written back
+unchanged leaves the stored value, and its time of day, alone.
+
+## Read-only projects
+
+A Daymark project with `managed_by` set belongs to another system that rewrites
+it. This adapter reads such a project with `readonly: true`, marks every field not
+writable, and refuses writes to it with `forbidden`. Mark one with
+`daymark project set PROJECT --managed-by SYSTEM`.
+
+## Development
+
+Until Daymark 0.4.0 is tagged, develop against a local Daymark checkout:
+
+```sh
+uv venv
+uv pip install -e /path/to/daymark          # the local daymark-core
+uv pip install -e . --no-deps               # this package, without the git dependency
+uv pip install pytest ruff build
+uv run --no-sync pytest -q
+uv run --no-sync ruff check src tests && uv run --no-sync ruff format --check src tests
+```
+
+Once the tag exists, `uv sync --dev` resolves `daymark-core` from it. Tests run the
+installed console script as a subprocess against temporary databases; all
+records are synthetic.
+
+## License
+
+[MIT](LICENSE).
