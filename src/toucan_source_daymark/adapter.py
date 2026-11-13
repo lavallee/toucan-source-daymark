@@ -104,6 +104,29 @@ def _project(store, workspace, project_id):
 # -- reading
 
 
+def _fits(declared, value, people):
+    """Whether a stored value fits its field's declaration as it now stands."""
+    kind = declared["type"]
+    if value is None:
+        return True
+    if kind in {"text", "url"}:
+        return isinstance(value, str)
+    if kind == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind == "bool":
+        return isinstance(value, bool)
+    if kind == "date":
+        return plans.is_civil_date(value)
+    if kind == "person":
+        return isinstance(value, str) and value in people
+    options = {o["id"] for o in declared["options"]}
+    if kind == "option":
+        return isinstance(value, str) and value in options
+    return (
+        isinstance(value, list) and all(isinstance(x, str) for x in value) and set(value) <= options
+    )
+
+
 def _item(task, view, members):
     """One task as a plan item. ``members`` are the IDs of the plan's items."""
     stage = plans.resolve_stage(task, view["stages"])
@@ -134,8 +157,12 @@ def _item(task, view, members):
         "url": None,
         "status": task["status"],
     }
+    people = {p["id"] for p in view["people"]}
     for field in view["fields"]:
-        item[CUSTOM + field["id"]] = task["values"].get(field["id"])
+        value = task["values"].get(field["id"])
+        # A value that no longer fits its field (retyped, option removed) is not
+        # sent; the field lists the items it was left out for, in "omitted".
+        item[CUSTOM + field["id"]] = value if _fits(field, value, people) else None
     return item
 
 
@@ -194,6 +221,14 @@ def _fields(view, writable):
             extra["options"] = people
         if declared.get("unit"):
             extra["unit"] = declared["unit"]
+        person_ids = {p["id"] for p in view["people"]}
+        omitted = [
+            c["id"]
+            for c in view["tasks"]
+            if not _fits(declared, c["values"].get(declared["id"]), person_ids)
+        ]
+        if omitted:
+            extra["omitted"] = omitted
         out.append(
             field(
                 CUSTOM + declared["id"], declared["label"], FIELD_TYPES[declared["type"]], **extra
