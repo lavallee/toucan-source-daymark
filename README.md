@@ -67,6 +67,11 @@ object on standard error, `{"error": CODE, "message": TEXT}`, where `CODE` is
 `not_found` (exit 3), `conflict` (4), `invalid` (5), `forbidden` (7) or
 `unavailable` (1).
 
+Options may come anywhere. `--` makes the next argument a reference even if it
+looks like an option, and toucan passes it (`read -- demo/rel`,
+`changes -- demo/rel --after 184`); a reference that begins with `-` is refused
+with `invalid`, so it can never be taken for an option.
+
 A reference is `WORKSPACE/PROJECT_ID`, split at the first `/`. A Daymark workspace
 is a hard boundary: a reference reads and writes only its own.
 

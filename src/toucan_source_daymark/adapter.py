@@ -86,7 +86,7 @@ def _open(path):
 
 def _ref(ref):
     workspace, _, project = (ref or "").partition("/")
-    if not workspace or not project:
+    if not workspace or not project or ref.startswith("-"):
         raise Failure("invalid", "A reference is WORKSPACE/PROJECT_ID")
     return workspace, project
 
@@ -465,10 +465,16 @@ def write(store, ref, document, actor):
 
 
 def _parse(argv):
+    """Options anywhere; ``--`` makes the next argument positional, so a reference can
+    never be read as an option (toucan passes it before the reference)."""
     args, options = [], {}
     items = iter(argv)
     for arg in items:
-        if arg in {"--db", "--after"}:
+        if arg == "--":
+            following = next(items, None)
+            if following is not None:
+                args.append(following)
+        elif arg in {"--db", "--after"}:
             options[arg[2:]] = next(items, None)
         elif arg.startswith(("--db=", "--after=")):
             name, _, value = arg[2:].partition("=")
@@ -477,6 +483,8 @@ def _parse(argv):
             options["help"] = True
         elif arg == "--version":
             options["version"] = True
+        elif arg.startswith("-"):
+            raise Failure("invalid", "Unknown option; put -- before a reference")
         else:
             args.append(arg)
     return args, options

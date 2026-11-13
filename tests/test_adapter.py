@@ -305,6 +305,18 @@ def test_milestone_marker_membership_and_containers(db):
     assert results["box"]["error"] == "invalid"  # Read-only.
 
 
+def test_double_dash_before_a_reference(db):
+    cursor = run(db, "read", "--", "home/site")[1]["cursor"]
+    assert run(db, "changes", "--", "home/site", "--after", cursor)[1]["changed"] is False
+    assert run(db, "changes", "--after", cursor, "--", "home/site")[1]["changed"] is False
+    assert run(db, "--db", str(db), "read", "--", "home/site")[0] == 0
+    status, _, err = run(db, "write", "--", "home/site", stdin={"changes": []})
+    assert status == 0
+    for args in (("read", "--", "-home/site"), ("read", "--", "--help"), ("read", "-x")):
+        status, _, err = run(db, *args)
+        assert (status, err["error"]) == (5, "invalid")
+
+
 def test_a_write_killed_midway_leaves_whole_changes_only(db):
     """Each change is one SQLite transaction (create and place together), so killing
     the process group mid-write leaves every change applied whole or not at all; a
@@ -319,7 +331,7 @@ def test_a_write_killed_midway_leaves_whole_changes_only(db):
     ]  # fmt: skip
     payload = json.dumps({"changes": changes})
     process = subprocess.Popen(
-        [str(ADAPTER), "write", "home/site"],
+        [str(ADAPTER), "write", "--", "home/site"],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -336,7 +348,7 @@ def test_a_write_killed_midway_leaves_whole_changes_only(db):
     made = [t for t in store.list("home", kind="task") if t["title"].startswith("Card ")]
     assert all(t["rank"] and t["values"]["points"] == int(t["title"][5:]) for t in made)
     store.close()
-    status, out, _ = run(db, "write", "home/site", stdin={"changes": changes})
+    status, out, _ = run(db, "write", "--", "home/site", stdin={"changes": changes})
     assert status == 0 and all(r["ok"] for r in out["results"])
     store = Store(db)
     titles = [t["title"] for t in store.list("home", kind="task") if t["title"].startswith("Card ")]
