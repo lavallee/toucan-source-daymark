@@ -54,7 +54,7 @@ FIELD_TYPES = {
 }
 CUSTOM = "field:"
 WRITABLE = ("title", "detail", "stage", "assignee", "start", "end", "deadline", "priority",
-            "labels", "dependsOn", "parent", "milestone", "isMilestone", "goal", "type", "done",
+            "labels", "dependsOn", "parent", "milestone", "inMilestone", "goal", "type", "done",
             "estimate")  # fmt: skip
 
 
@@ -109,6 +109,7 @@ def _item(task, view, members):
     stage = plans.resolve_stage(task, view["stages"])
     dates = plans.plan_dates(task)
     milestones = {c["id"] for c in view["tasks"] if c["milestone"]}
+    containers = {t["id"] for t in view["types"] if t["container"]}
     item = {
         "id": task["id"],
         "version": task["version"],
@@ -123,8 +124,9 @@ def _item(task, view, members):
         "labels": list(task["label_ids"]),
         "dependsOn": [ref for ref in task["depends_on"] if ref in members],
         "parent": task["parent_id"] if task["parent_id"] in members else None,
-        "milestone": task["milestone_id"] if task["milestone_id"] in milestones else None,
-        "isMilestone": task["milestone"],
+        "milestone": task["milestone"],
+        "inMilestone": task["milestone_id"] if task["milestone_id"] in milestones else None,
+        "container": task["type"] in containers or task["id"] in view["parents"],
         "goal": task["goal_id"],
         "type": task["type"],
         "done": task["status"] == "completed",
@@ -166,9 +168,10 @@ def _fields(view, writable):
               options=[option(x["id"], x["title"] or x["id"]) for x in view["labels"]]),
         field("dependsOn", "Depends on", "options", items=True),
         field("parent", containers[0]["label"] if containers else "Parent", "option", items=True),
-        field("milestone", "Milestone", "option", options=[
+        field("milestone", "Is a milestone", "bool"),
+        field("inMilestone", "Milestone", "option", items=True, options=[
             option(c["id"], c["title"] or c["id"]) for c in view["tasks"] if c["milestone"]]),
-        field("isMilestone", "Is a milestone", "bool"),
+        {"id": "container", "label": "Container", "type": "bool", "writable": False},
         field("goal", "Goal", "option",
               options=[option(g["id"], g["title"] or g["id"]) for g in view["goals"]]),
         field("done", "Done", "bool"),
@@ -278,11 +281,11 @@ def _translate(changes, task, members, view):
             if value is not None and not isinstance(value, str):
                 raise Failure("invalid", "detail is text or null")
             out["description"] = value or ""
-        elif key in {"stage", "assignee", "parent", "milestone", "goal", "type"}:
+        elif key in {"stage", "assignee", "parent", "inMilestone", "goal", "type"}:
             if value is not None and not isinstance(value, str):
                 raise Failure("invalid", f"{key} is an option id or null")
             target = {"stage": "stage", "assignee": "assignee_id", "parent": "parent_id",
-                      "milestone": "milestone_id", "goal": "goal_id", "type": "type"}[key]  # fmt: skip
+                      "inMilestone": "milestone_id", "goal": "goal_id", "type": "type"}[key]  # fmt: skip
             out[target] = value
         elif key in {"start", "end", "deadline"}:
             dates[key] = value
@@ -303,10 +306,10 @@ def _translate(changes, task, members, view):
                 # The plan shows only dependencies inside the project; keep the others.
                 outside = [r for r in (task or {}).get("depends_on", []) if r not in members]
                 out["depends_on"] = list(dict.fromkeys([*outside, *value]))
-        elif key in {"isMilestone", "done"}:
+        elif key in {"milestone", "done"}:
             if not isinstance(value, bool):
                 raise Failure("invalid", f"{key} is true or false")
-            if key == "isMilestone":
+            if key == "milestone":
                 out["milestone"] = value
             elif value:
                 out["status"] = "completed"

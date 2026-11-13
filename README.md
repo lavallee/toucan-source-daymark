@@ -87,7 +87,7 @@ is a hard boundary: a reference reads and writes only its own.
     {"id": "dm-ab12", "version": 3, "title": "Draft the sitemap", "detail": null,
      "stage": "todo", "assignee": "ada", "start": "2030-04-10", "end": "2030-04-20",
      "deadline": null, "priority": "2", "labels": [], "dependsOn": [], "parent": null,
-     "milestone": "beta", "isMilestone": false, "goal": null, "type": "story",
+     "milestone": false, "inMilestone": "beta", "container": false, "goal": null, "type": "story",
      "done": false, "estimate": 240, "url": null, "status": "open", "field:points": 3}
   ]
 }
@@ -115,7 +115,9 @@ cancelled stage.
 Whether anything the plan shows changed after the cursor: the project, its tasks,
 tasks entering or leaving it, what its tasks depend on outside it, its goal, or a
 person, label or goal it can name. It is one indexed query, cheap enough to ask
-every few seconds. A cursor from the future (after a restore) answers `true`.
+every few seconds: on a synthetic workspace of 20,000 tasks in 101 projects it
+takes about 8 ms inside Daymark and about 135 ms as a whole process, most of that
+Python start-up, against toucan's 8-second allowance. A cursor from the future (after a restore) answers `true`.
 
 ### Write
 
@@ -148,6 +150,9 @@ answers
   change under a mutation already used answers `conflict`.
 - A change's field update and its placement are one transaction. Changes are
   independent of each other: one failing does not stop the rest.
+- Each change is one SQLite transaction. If the process is killed mid-write (toucan
+  kills it after 30 s), every change is either applied whole or not at all, and
+  sending the same write again completes it without duplicates.
 - There is no delete. Removing work is a decision made in Daymark (`daymark
   cancel`, `daymark archive`).
 
@@ -166,8 +171,9 @@ answers
 | `labels` | options | `label_ids` | options are the workspace's labels |
 | `dependsOn` | options (`items: true`) | `depends_on` | only dependencies inside the project; writing keeps the others |
 | `parent` | option (`items: true`) | `parent_id` | labelled with the project's container type (for example "Epic") if it has one |
-| `milestone` | option | `milestone_id` | the milestone the item counts toward; options are the project's milestones |
-| `isMilestone` | bool | `milestone` | whether the item is itself a milestone |
+| `milestone` | bool | `milestone` | the marker: the item is itself a milestone (toucan draws a diamond) |
+| `inMilestone` | option (`items: true`) | `milestone_id` | labelled "Milestone": the milestone the item counts toward; its options are the project's milestone items |
+| `container` | bool, read-only | | true when the item's type is a container type (such as an epic) or it has children; lets a view leave containers out of a lane or column |
 | `goal` | option | `goal_id` | options are the workspace's goals |
 | `type` | option | `type` | only when the project declares types |
 | `done` | bool | `status` | true completes; false reopens a completed or cancelled item |
@@ -176,7 +182,7 @@ answers
 | `url` | | | always `null` |
 | `field:ID` | per type | `values[ID]` | each field the project declares: text, url → text; number; bool; date; option; options; person → option of people. A number field may carry `unit`. |
 
-`items: true`, `unit`, `source.managedBy` and the list's `readonly` go beyond the
+`inMilestone`, `container`, `items: true`, `unit`, `source.managedBy` and the list's `readonly` go beyond the
 base protocol; a reader may ignore them. Roll-ups (progress, health, milestone and
 parent summaries) are not part of the protocol; read them from Daymark itself
 (`daymark plan`, `GET /v1/projects/{id}/plan`).

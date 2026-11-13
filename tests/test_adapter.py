@@ -102,7 +102,15 @@ def test_list_and_read(db):
     assert fields["parent"]["label"] == "Epic"
     assert fields["type"]["options"] == [{"id": "epic", "label": "Epic", "color": "violet"},
                                          {"id": "story", "label": "Story", "color": "blue"}]  # fmt: skip
-    assert fields["milestone"]["options"] == [{"id": "beta", "label": "Beta"}]
+    assert fields["inMilestone"]["options"] == [{"id": "beta", "label": "Beta"}]
+    assert fields["inMilestone"]["items"] is True and fields["inMilestone"]["label"] == "Milestone"
+    assert fields["milestone"]["type"] == "bool" and "isMilestone" not in fields
+    assert fields["container"] == {
+        "id": "container",
+        "label": "Container",
+        "type": "bool",
+        "writable": False,
+    }
     assert fields["goal"]["options"] == [{"id": "launch", "label": "Launch"}]
     assert fields["field:points"] == {"id": "field:points", "label": "Points", "type": "number",
                                       "writable": True}  # fmt: skip
@@ -114,11 +122,11 @@ def test_list_and_read(db):
     assert items["map"] == {
         "id": "map", "version": 1, "title": "Sitemap", "detail": None, "stage": "todo",
         "assignee": "ada", "start": "2030-04-10", "end": "2030-04-20", "deadline": None,
-        "priority": None, "labels": [], "dependsOn": [], "parent": None, "milestone": "beta",
-        "isMilestone": False, "goal": None, "type": "story", "done": False, "estimate": None,
+        "priority": None, "labels": [], "dependsOn": [], "parent": None, "milestone": False,
+        "inMilestone": "beta", "container": False, "goal": None, "type": "story", "done": False, "estimate": None,
         "url": None, "status": "open", "field:points": 3, "field:risk": "low",
     }  # fmt: skip
-    assert items["beta"]["isMilestone"] is True and items["copy"]["dependsOn"] == ["map"]
+    assert items["beta"]["milestone"] is True and items["copy"]["dependsOn"] == ["map"]
     assert (items["copy"]["start"], items["copy"]["end"]) == ("2030-04-15", "2030-05-01")
     plain = Store(db)
     Tasks(plain, "home", timezone=ZONE, now=NOW).project("Bare", id="bare")
@@ -138,7 +146,7 @@ def test_write_changes_conflict_and_replay(db):
          "place": {"after": "copy"}},
         {"op": "create", "mutation": "m-2", "set": {"title": "New card", "stage": "doing",
                                                     "assignee": "ada", "estimate": 90,
-                                                    "type": "epic", "milestone": "beta"},
+                                                    "type": "epic", "inMilestone": "beta"},
          "place": {"after": None}},
         {"op": "update", "id": "copy", "version": 7, "mutation": "m-3", "set": {"title": "x"}},
         {"op": "update", "id": "copy", "version": 1, "mutation": "m-4",
@@ -154,7 +162,7 @@ def test_write_changes_conflict_and_replay(db):
     assert item["field:points"] == 5 and item["field:risk"] is None
     assert item["labels"] == ["urgent"] and item["priority"] == "2"
     created = results["m-2"]["item"]
-    assert (created["stage"], created["type"], created["milestone"]) == ("doing", "epic", "beta")
+    assert (created["stage"], created["type"], created["inMilestone"]) == ("doing", "epic", "beta")
     assert results["m-3"]["error"] == "conflict" and results["m-3"]["item"]["version"] == 1
     assert results["m-4"]["error"] == "invalid" and results["m-4"]["item"]["id"] == "copy"
     assert results["m-5"]["error"] == "not_found" and "item" not in results["m-5"]
@@ -270,3 +278,67 @@ def test_an_older_database_is_reported_not_upgraded(db, tmp_path):
 def test_the_entry_point_reports_its_version():
     out = subprocess.run([str(ADAPTER), "--version"], capture_output=True, check=False, text=True)
     assert out.stdout.strip() == "toucan-source-daymark 0.1.0"
+
+
+def test_milestone_marker_membership_and_containers(db):
+    store = Store(db)
+    tasks = Tasks(store, "home", timezone=ZONE, now=NOW)
+    tasks.add("Accounts", id="acc", project="site", type="epic")
+    tasks.add("Parent by use", id="holder", project="site")
+    tasks.add("Child", id="child", project="site", parent="holder")
+    store.close()
+    items = {i["id"]: i for i in run(db, "read", "home/site")[1]["items"]}
+    assert items["acc"]["container"] is True  # A container type, even with no children.
+    assert items["holder"]["container"] is True  # Has children.
+    assert items["child"]["container"] is False and items["map"]["container"] is False
+    _, results = write(
+        db,
+        {"op": "update", "id": "copy", "version": 1, "mutation": "mark",
+         "set": {"milestone": True}},
+        {"op": "update", "id": "child", "version": 1, "mutation": "join",
+         "set": {"inMilestone": "beta"}},
+        {"op": "update", "id": "map", "version": 1, "mutation": "box",
+         "set": {"container": True}},
+    )  # fmt: skip
+    assert results["mark"]["item"]["milestone"] is True and task(db, "copy")["milestone"] is True
+    assert results["join"]["item"]["inMilestone"] == "beta"
+    assert results["box"]["error"] == "invalid"  # Read-only.
+
+
+def test_a_write_killed_midway_leaves_whole_changes_only(db):
+    """Each change is one SQLite transaction (create and place together), so killing
+    the process group mid-write leaves every change applied whole or not at all; a
+    retry of the same write completes it without duplicates."""
+    import signal
+    import time
+
+    changes = [
+        {"op": "create", "mutation": f"bulk-{i}", "set": {"title": f"Card {i}", "field:points": i},
+         "place": {"after": None}}
+        for i in range(400)
+    ]  # fmt: skip
+    payload = json.dumps({"changes": changes})
+    process = subprocess.Popen(
+        [str(ADAPTER), "write", "home/site"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "DAYMARK_DB": str(db), "DAYMARK_TZ": ZONE},
+        start_new_session=True,
+    )
+    process.stdin.write(payload.encode())
+    process.stdin.close()
+    time.sleep(1.0)
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=30)
+    store = Store(db)
+    assert store.db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    made = [t for t in store.list("home", kind="task") if t["title"].startswith("Card ")]
+    assert all(t["rank"] and t["values"]["points"] == int(t["title"][5:]) for t in made)
+    store.close()
+    status, out, _ = run(db, "write", "home/site", stdin={"changes": changes})
+    assert status == 0 and all(r["ok"] for r in out["results"])
+    store = Store(db)
+    titles = [t["title"] for t in store.list("home", kind="task") if t["title"].startswith("Card ")]
+    store.close()
+    assert sorted(titles) == sorted(f"Card {i}" for i in range(400))
