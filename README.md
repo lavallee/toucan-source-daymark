@@ -16,7 +16,7 @@ dropped between two others sets its place in the project's order.
 
 ## Install
 
-It needs Python 3.11 or newer. **This release, 0.1.0, works with Daymark 0.4.0**:
+It needs Python 3.11 or newer and toucan 0.15.0 or newer (the first release with plan sources). **This release, 0.1.0, works with Daymark 0.4.0**:
 it installs `daymark-core` pinned to the `v0.4.0` tag, and reads and writes
 databases at Daymark 0.4.0's schema (schema 5).
 
