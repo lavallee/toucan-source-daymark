@@ -354,3 +354,201 @@ def test_a_write_killed_midway_leaves_whole_changes_only(db):
     titles = [t["title"] for t in store.list("home", kind="task") if t["title"].startswith("Card ")]
     store.close()
     assert sorted(titles) == sorted(f"Card {i}" for i in range(400))
+
+
+# -- second review
+
+
+@pytest.fixture
+def typed(tmp_path):
+    """A project using every custom field type."""
+    path = tmp_path / "typed.sqlite3"
+    store = Store(path)
+    tasks = Tasks(store, "home", timezone=ZONE, now=NOW)
+    tasks.add("Ada", kind="person", id="ada")
+    tasks.project("Typed", id="typed", fields=(
+        "note:Note:text,link:Link:url,flag:Flag:bool,when:When:date,tags:Tags:options:a|b|c,"
+        "who:Who:person,risk:Risk:option:lo|hi,pts:Points:number"))  # fmt: skip
+    tasks.add("One", id="one", project="typed")
+    tasks.add("Two", id="two", project="typed")
+    tasks.propose("Idea", id="idea", project="typed")
+    tasks.add("Shelved", id="shelved", project="typed")
+    tasks.archive("shelved")
+    tasks.add("Dropped", id="dropped", project="typed")
+    tasks.cancel("dropped")
+    tasks.project("Old", id="old")
+    tasks.archive("old")
+    store.close()
+    return path
+
+
+def write_to(db, ref, *changes):
+    status, out, err = run(db, "write", "--", ref, stdin={"changes": list(changes)})
+    assert status == 0, err
+    return {r["mutation"]: r for r in out["results"]}
+
+
+def test_every_custom_field_type_reads_and_writes(typed):
+    good = {"field:note": "Call first", "field:link": "https://example.invalid/spec",
+            "field:flag": True, "field:when": "2030-04-30", "field:tags": ["a", "c"],
+            "field:who": "ada", "field:risk": "hi", "field:pts": 2.5}  # fmt: skip
+    fields = {f["id"]: f for f in run(typed, "read", "--", "home/typed")[1]["fields"]}
+    assert [fields[k]["type"] for k in good] == [
+        "text", "text", "bool", "date", "options", "option", "option", "number"]  # fmt: skip
+    assert fields["field:who"]["options"] == [{"id": "ada", "label": "Ada"}]
+    results = write_to(typed, "home/typed", {"op": "update", "id": "one", "version": 1,
+                                             "mutation": "all", "set": good})  # fmt: skip
+    assert results["all"]["ok"], results
+    assert {k: results["all"]["item"][k] for k in good} == good
+    for key, bad in (("field:link", "ftp://x"), ("field:flag", "yes"), ("field:when", "30/04"),
+                     ("field:tags", ["z"]), ("field:who", "nobody"), ("field:pts", "many")):  # fmt: skip
+        result = write_to(typed, "home/typed", {"op": "update", "id": "two", "version": 1,
+                                                "mutation": "bad" + key, "set": {key: bad}})  # fmt: skip
+        assert result["bad" + key]["error"] == "invalid", key
+    cleared = write_to(typed, "home/typed", {"op": "update", "id": "one", "version": 2,
+                                             "mutation": "clear", "set": {"field:note": None}})  # fmt: skip
+    assert cleared["clear"]["item"]["field:note"] is None
+    assert cleared["clear"]["item"]["field:tags"] == ["a", "c"]  # Other values stay.
+
+
+def test_values_that_no_longer_fit_their_field_are_omitted_and_marked(typed):
+    write_to(typed, "home/typed", {"op": "update", "id": "one", "version": 1, "mutation": "v",
+                                   "set": {"field:pts": 3, "field:risk": "hi"}})  # fmt: skip
+    store = Store(typed)
+    Tasks(store, "home", timezone=ZONE, now=NOW).configure(
+        "typed", fields="pts:Points:text,risk:Risk:option:lo"
+    )
+    store.close()
+    plan = run(typed, "read", "--", "home/typed")[1]
+    fields = {f["id"]: f for f in plan["fields"]}
+    item = next(i for i in plan["items"] if i["id"] == "one")
+    assert item["field:pts"] is None and fields["field:pts"]["omitted"] == ["one"]
+    assert item["field:risk"] is None and fields["field:risk"]["omitted"] == ["one"]
+    assert task(typed, "one")["values"] == {"pts": 3, "risk": "hi"}  # Kept in Daymark.
+
+
+def test_writes_reach_only_items_of_the_plan(typed):
+    for id in ("idea", "shelved", "dropped"):
+        result = write_to(typed, "home/typed", {"op": "update", "id": id,
+                                                "version": task(typed, id)["version"],
+                                                "mutation": id, "set": {"title": "x"}})  # fmt: skip
+        assert result[id]["error"] == "not_found" and "item" not in result[id]
+        assert task(typed, id)["title"] != "x"
+    store = Store(typed)
+    Tasks(store, "home", timezone=ZONE, now=NOW).add("Elsewhere", id="loose")
+    store.close()
+    results = write_to(
+        typed, "home/typed",
+        {"op": "update", "id": "one", "version": 1, "mutation": "dep",
+         "set": {"dependsOn": ["loose"]}},
+        {"op": "update", "id": "one", "version": 1, "mutation": "par",
+         "set": {"parent": "idea"}},
+        {"op": "create", "mutation": "new", "set": {"title": "New"}},
+        {"op": "update", "id": "one", "version": 1, "mutation": "later",
+         "set": {"dependsOn": [task_id("typed", "new")]}},
+    )  # fmt: skip
+    assert results["dep"]["error"] == "invalid" and results["par"]["error"] == "invalid"
+    assert results["later"]["ok"]  # An item created earlier in the same write counts.
+    assert task(typed, "one")["depends_on"] == [task_id("typed", "new")]
+    assert run(typed, "read", "--", "home/old")[2]["error"] == "not_found"
+    assert "home/old" not in [s["ref"] for s in run(typed, "list")[1]["sources"]]
+
+
+def task_id(project, mutation):
+    from toucan_source_daymark.adapter import _short_id
+
+    return _short_id("home", project, mutation)
+
+
+def test_a_change_that_changes_nothing_writes_nothing(db):
+    before = head(db)
+    results = write_to(db, "home/site", {
+        "op": "update", "id": "map", "version": 1, "mutation": "same",
+        "set": {"title": "Sitemap", "stage": "todo", "field:points": 3, "start": "2030-04-10",
+                "inMilestone": "beta"}})  # fmt: skip
+    assert results["same"]["ok"] and results["same"]["item"]["version"] == 1
+    results = write_to(db, "home/site", {"op": "update", "id": "map", "version": 1,
+                                         "mutation": "here", "place": {"after": "beta"}})  # fmt: skip
+    assert results["here"]["ok"] and results["here"]["item"]["version"] == 1
+    results = write_to(db, "home/site", {"op": "update", "id": "map", "version": 0,
+                                         "mutation": "stale-noop", "set": {}})  # fmt: skip
+    assert results["stale-noop"]["ok"] and results["stale-noop"]["item"]["version"] == 1
+    assert head(db) == before
+
+
+def test_a_null_start_clears_and_a_null_end_leaves_the_deadline(db):
+    results = write_to(db, "home/site", {"op": "update", "id": "copy", "version": 1,
+                                         "mutation": "s", "set": {"start": None}})  # fmt: skip
+    assert results["s"]["item"]["start"] is None and task(db, "copy")["earliest_start"] is None
+    results = write_to(db, "home/site", {"op": "update", "id": "copy", "version": 2,
+                                         "mutation": "e", "set": {"end": None}})  # fmt: skip
+    assert results["e"]["item"]["end"] == results["e"]["item"]["deadline"] == "2030-05-01"
+
+
+def test_a_busy_database_answers_unavailable_inside_the_allowance(db):
+    import time
+
+    holder = sqlite3.connect(db, timeout=1)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("UPDATE daymark_scheduler SET value=value WHERE key='schema'")
+    try:
+        assert run(db, "changes", "--", "home/site", "--after", "0")[0] == 0  # Reads go on.
+        started = time.monotonic()
+        status, _, err = run(db, "write", "--", "home/site", stdin={"changes": [
+            {"op": "create", "mutation": "blocked", "set": {"title": "x"}}]})  # fmt: skip
+        took = time.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    assert status == 1 and err["error"] == "unavailable" and "busy" in err["message"]
+    assert 9 < took < 25
+
+
+def test_changes_answer_while_another_process_writes(db):
+    changes = [{"op": "create", "mutation": f"c{i}", "set": {"title": f"Card {i}"}}
+               for i in range(300)]  # fmt: skip
+    import threading
+
+    writer = subprocess.Popen(
+        [str(ADAPTER), "write", "--", "home/site"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "DAYMARK_DB": str(db), "DAYMARK_TZ": ZONE},
+    )  # fmt: skip
+    box = {}
+    talker = threading.Thread(
+        target=lambda: box.update(out=writer.communicate(json.dumps({"changes": changes}))[0])
+    )
+    talker.start()
+    polls = []
+    while talker.is_alive() and len(polls) < 200:
+        polls.append(run(db, "changes", "--", "home/site", "--after", "0"))
+    talker.join(timeout=120)
+    assert writer.returncode == 0
+    assert polls and all(status == 0 for status, _, _ in polls)
+    assert all(r["ok"] for r in json.loads(box["out"])["results"])
+
+
+def test_a_newer_schema_is_refused(db):
+    raw = sqlite3.connect(db)
+    raw.execute("UPDATE daymark_scheduler SET value='6' WHERE key='schema'")
+    raw.commit()
+    raw.close()
+    status, _, err = run(db, "read", "--", "home/site")
+    assert status == 1 and err["error"] == "unavailable" and "newer Daymark" in err["message"]
+
+
+def test_a_daymark_too_old_for_this_adapter_is_named(tmp_path):
+    fake = tmp_path / "fake" / "daymark"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text("class DomainError(Exception):\n    pass\nStore = None\n")
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(fake.parent)!r})\n"
+        "from toucan_source_daymark.adapter import main\n"
+        "raise SystemExit(main(['read', '--', 'home/site']))\n"
+    )
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             check=False)  # fmt: skip
+    error = json.loads(process.stderr)
+    assert process.returncode == 1 and error["error"] == "unavailable"
+    assert "needs daymark-core 0.4.0" in error["message"]
