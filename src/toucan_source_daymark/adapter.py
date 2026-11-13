@@ -22,10 +22,23 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
-from daymark import DomainError, Store, plans
-from daymark.tasks import local_timezone
+NEEDS = "0.4.0"  # The daymark-core release this adapter release works with.
+
+try:
+    from daymark import DomainError, Store, plans
+    from daymark.store import RELEASE  # noqa: F401 - present from 0.4.0
+    from daymark.tasks import local_timezone
+
+    _TOO_OLD = not hasattr(plans, "schedule")
+except ImportError:  # An older or missing daymark-core.
+    _TOO_OLD = True
+
+    class DomainError(Exception):  # Stands in so the except clauses below still work.
+        code = "invalid"
+
 
 CODES = {"not_found": 3, "conflict": 4, "invalid": 5, "forbidden": 7, "unavailable": 1}
 _ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -53,6 +66,7 @@ FIELD_TYPES = {
     "person": "option",
 }
 CUSTOM = "field:"
+WRITE_BUDGET = 20.0  # Seconds a write may spend before leaving the rest for a retry.
 WRITABLE = ("title", "detail", "stage", "assignee", "start", "end", "deadline", "priority",
             "labels", "dependsOn", "parent", "milestone", "inMilestone", "goal", "type", "done",
             "estimate")  # fmt: skip
@@ -75,13 +89,17 @@ def database(explicit=None):
     return str(home / "daymark" / "daymark.sqlite3")
 
 
-def _open(path):
+def _open(path, busy=5.0):
     if path != ":memory:" and not Path(path).is_file():
         raise Failure("unavailable", "No Daymark database; run `daymark init`")
     try:
-        return Store(path, upgrade=False)  # Never upgrade a file someone else owns.
+        store = Store(path, upgrade=False)  # Never upgrade a file someone else owns.
     except DomainError as exc:
         raise Failure("unavailable", str(exc)) from None
+    # Wait for another writer well inside toucan's allowance (8 s for changes, 30 s
+    # for read and write), then answer unavailable rather than be killed.
+    store.db.execute(f"PRAGMA busy_timeout = {int(busy * 1000)}")
+    return store
 
 
 def _ref(ref):
@@ -508,9 +526,20 @@ def write(store, ref, document, actor):
         raise Failure("invalid", "At most 500 changes per write")
     view = store.plan(workspace, project_id)
     members = {card["id"] for card in view["tasks"]}
-    outcomes = []
+    outcomes, started = [], time.monotonic()
     for change in document["changes"]:
         mutation = change.get("mutation") if isinstance(change, dict) else None
+        if time.monotonic() - started > WRITE_BUDGET:
+            # Stop well inside toucan's 30 s; each change is whole, so a retry finishes.
+            fallback = change.get("id") if isinstance(change, dict) else None
+            outcomes.append(
+                (
+                    mutation,
+                    fallback,
+                    Failure("unavailable", "Not attempted: out of time; send again"),
+                )
+            )
+            continue
         try:
             id = _apply(store, workspace, project_id, change, members, view, actor)
             outcomes.append((mutation, id, None))
@@ -568,6 +597,28 @@ def _parse(argv):
     return args, options
 
 
+def _too_old_message():
+    try:
+        from importlib.metadata import version
+
+        installed = version("daymark-core")
+    except Exception:  # noqa: BLE001 - only for the message
+        installed = "not installed"
+    return (
+        f"toucan-source-daymark needs daymark-core {NEEDS} or newer; installed: {installed}. "
+        "Upgrade both together: uv tool upgrade toucan-source-daymark"
+    )
+
+
+def _describe(exc):
+    """A failure's kind, never stored content."""
+    if type(exc).__name__ == "OperationalError" and ("locked" in str(exc) or "busy" in str(exc)):
+        return "The Daymark database is busy (another writer); try again"
+    if type(exc).__name__ in {"OperationalError", "DatabaseError"}:
+        return f"The Daymark database could not be used ({type(exc).__name__})"
+    return f"Daymark failed ({type(exc).__name__})"
+
+
 def run(argv, stdin):
     args, options = _parse(argv)
     if options.get("version"):
@@ -576,13 +627,15 @@ def run(argv, stdin):
         return f"toucan-source-daymark {__version__}\n"
     if options.get("help") or not args:
         return __doc__
+    if _TOO_OLD:
+        raise Failure("unavailable", _too_old_message())
     command, rest = args[0], args[1:]
     path = database(options.get("db"))
     if command == "list" and not rest:
         return listing(path)
     if command not in {"read", "changes", "write"} or len(rest) != 1:
         raise Failure("invalid", "Usage: list | read REF | changes REF --after CUR | write REF")
-    store = _open(path)
+    store = _open(path, busy=5.0 if command == "changes" else 10.0)
     try:
         if command == "read":
             return read(store, rest[0])
@@ -609,8 +662,8 @@ def main(argv=None, stdin=None, stdout=None, stderr=None):
         code = exc.code if exc.code in CODES else "invalid"
         stderr.write(json.dumps({"error": code, "message": str(exc)}) + "\n")
         return CODES[code]
-    except Exception:  # noqa: BLE001 - stored content must not reach the caller's logs
-        stderr.write(json.dumps({"error": "unavailable", "message": "Daymark failed"}) + "\n")
+    except Exception as exc:  # noqa: BLE001 - stored content must not reach the caller's logs
+        stderr.write(json.dumps({"error": "unavailable", "message": _describe(exc)}) + "\n")
         return CODES["unavailable"]
     if isinstance(result, str):
         stdout.write(result)
