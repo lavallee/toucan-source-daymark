@@ -3,7 +3,7 @@
 A small adapter: toucan runs it as `toucan-source-daymark list|read|changes|write`
 and it reads and writes a Daymark project. Keep it small and boring.
 
-- Develop against a local Daymark (see README, Development); `uv run --no-sync
+- Develop against a local Daymark (see README, Development); `uv run
   pytest -q`, `ruff check src tests`, `ruff format --check src tests`.
 - The wire format is toucan's `toucan.plan/1`; toucan's docs are canonical. Do
   not change a wire shape without changing toucan's side to match.

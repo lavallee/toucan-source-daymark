@@ -38,8 +38,8 @@ def db(tmp_path):
     tasks.add("Copy", id="copy", project="site", after="map", due="2030-05-01",
               start="2030-04-15")  # fmt: skip
     tasks.propose("Compare hosts", id="idea", project="site")
-    tasks.project("Commitments", id="rev-commitments", managed_by="rev")
-    tasks.add("Projected", id="projected", project="rev-commitments")
+    tasks.project("Commitments", id="ledger-entries", managed_by="ledger")
+    tasks.add("Projected", id="projected", project="ledger-entries")
     Tasks(store, "studio", timezone=ZONE, now=NOW).project("Album", id="album")
     store.close()
     return path
@@ -87,7 +87,7 @@ def test_list_and_read(db):
     status, out, _ = run(db, "list")
     assert status == 0
     assert out == {"sources": [
-        {"ref": "home/rev-commitments", "title": "Commitments", "readonly": True,
+        {"ref": "home/ledger-entries", "title": "Commitments", "readonly": True,
          "description": "Daymark project in workspace home"},
         {"ref": "home/site", "title": "Website relaunch", "readonly": False,
          "description": "The new site"},
@@ -230,10 +230,10 @@ def test_dates_only_checked_when_written_and_deadlines_keep_their_time(db):
 
 
 def test_read_only_projects_refuse_writes(db):
-    status, plan, _ = run(db, "read", "home/rev-commitments")
-    assert plan["source"]["readonly"] is True and plan["source"]["managedBy"] == "rev"
+    status, plan, _ = run(db, "read", "home/ledger-entries")
+    assert plan["source"]["readonly"] is True and plan["source"]["managedBy"] == "ledger"
     assert not any(f["writable"] for f in plan["fields"])
-    status, _, err = run(db, "write", "home/rev-commitments", stdin={"changes": [
+    status, _, err = run(db, "write", "home/ledger-entries", stdin={"changes": [
         {"op": "update", "id": "projected", "version": 1, "mutation": "r-1",
          "set": {"title": "Edited"}}]})  # fmt: skip
     assert status == 7 and err["error"] == "forbidden"

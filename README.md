@@ -235,18 +235,15 @@ writable, and refuses writes to it with `forbidden`. Mark one with
 
 ## Development
 
-Until Daymark 0.4.0 is tagged, develop against a local Daymark checkout:
-
 ```sh
-uv venv
-uv pip install -e /path/to/daymark          # the local daymark-core
-uv pip install -e . --no-deps               # this package, without the git dependency
-uv pip install pytest ruff build
-uv run --no-sync pytest -q
-uv run --no-sync ruff check src tests && uv run --no-sync ruff format --check src tests
+uv sync --dev                # resolves daymark-core from its v0.4.0 tag
+uv run pytest -q
+uv run ruff check src tests && uv run ruff format --check src tests
 ```
 
-Once the tag exists, `uv sync --dev` resolves `daymark-core` from it. Tests run the
+To work against a local Daymark checkout instead, install it over the pinned one
+(`uv pip install -e /path/to/daymark`) and run the same commands with `--no-sync`.
+Tests run the
 installed console script as a subprocess against temporary databases; all
 records are synthetic.
 

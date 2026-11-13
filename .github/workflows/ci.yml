@@ -23,7 +23,7 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       # Resolves daymark-core from its v0.4.0 tag (see pyproject.toml).
-      - run: uv sync --dev
+      - run: uv sync --frozen --dev
       - run: uv run ruff check src tests --output-format=github
       - run: uv run ruff format --check src tests
       - run: uv run pytest -q
