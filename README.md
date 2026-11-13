@@ -16,7 +16,9 @@ dropped between two others sets its place in the project's order.
 
 ## Install
 
-It needs Python 3.11 or newer and `daymark-core` 0.4.0 or newer.
+It needs Python 3.11 or newer. **This release, 0.1.0, works with Daymark 0.4.0**:
+it installs `daymark-core` pinned to the `v0.4.0` tag, and reads and writes
+databases at Daymark 0.4.0's schema (schema 5).
 
 ```sh
 uv tool install "toucan-source-daymark @ git+https://github.com/lavallee/toucan-source-daymark"
@@ -30,11 +32,24 @@ of `daymark-core`. It opens the same database file as your `daymark` command:
 a `.daymark/` folder above the working directory, because toucan runs it from
 somewhere unrelated; set `DAYMARK_DB` for a project database.
 
-It never creates a database and never upgrades one. If the file was written by a
-different Daymark release than the one it was installed with, it answers
-`unavailable` and says which Daymark the file needs; upgrade the tool
-(`uv tool upgrade toucan-source-daymark`) or open the file once with your
-`daymark` command.
+It never creates a database and never upgrades one, and it never downgrades one.
+A database that a newer Daymark has upgraded answers `unavailable` with a message
+naming the Daymark it needs: install the adapter release made for that Daymark.
+A database still at an older schema answers `unavailable` too: open it once with
+your `daymark` command (0.4.0) to upgrade it, after taking a backup. If the
+`daymark-core` it finds is older than 0.4.0, it answers `unavailable` naming the
+version it needs.
+
+Upgrade Daymark and the adapter together, so they agree on the schema:
+
+```sh
+daymark backup --file before-upgrade.sqlite3      # with the Daymark you are leaving
+uv tool install --force "daymark-core @ git+https://github.com/lavallee/daymark@vX.Y.Z"
+uv tool install --force "toucan-source-daymark @ git+https://github.com/lavallee/toucan-source-daymark@vA.B.C"
+```
+
+where `vA.B.C` is the adapter release whose README names Daymark `X.Y.Z`. Each tool
+keeps its own copy of `daymark-core`, so both must move.
 
 ## How toucan finds it
 
@@ -146,7 +161,10 @@ answers
 ```
 
 - `set` carries only changed fields, in the plan's ids and value forms; `null`
-  clears one.
+  clears one. A change that changes nothing (the same values, or a place the item
+  already has) writes nothing and answers `ok` with the item as it stands.
+- Only items of the plan can be written: a proposed, archived, or cancelled-off-board
+  task answers `not_found`. `dependsOn` and `parent` take items of this plan only.
 - `place: {"after": ID}` puts the item directly after another; `{"after": null}`
   puts it first. `{"before": ID}` and `{"before": null}` (last) also work. Without
   `place`, a new item goes last.
@@ -157,7 +175,13 @@ answers
   independent of each other: one failing does not stop the rest.
 - Each change is one SQLite transaction. If the process is killed mid-write (toucan
   kills it after 30 s), every change is either applied whole or not at all, and
-  sending the same write again completes it without duplicates.
+  sending the same write again completes it without duplicates. A write stops
+  starting new changes after 20 seconds and reports the rest `unavailable`, to be
+  sent again.
+- If another process holds Daymark's write lock, the adapter waits up to 5 s
+  (`changes`) or 10 s (`read`, each change of a `write`), then answers
+  `unavailable`, inside toucan's allowances of 8 s and 30 s. Reading never waits on
+  a writer.
 - There is no delete. Removing work is a decision made in Daymark (`daymark
   cancel`, `daymark archive`).
 
@@ -185,9 +209,9 @@ answers
 | `estimate` | number | `estimate_minutes` | minutes |
 | `status` | option, read-only | `status` | open, waiting, completed, cancelled |
 | `url` | | | always `null` |
-| `field:ID` | per type | `values[ID]` | each field the project declares: text, url → text; number; bool; date; option; options; person → option of people. A number field may carry `unit`. |
+| `field:ID` | per type | `values[ID]` | each field the project declares: text, url → text; number; bool; date; option; options; person → option of people. A number field may carry `unit`. A stored value that no longer fits its field (retyped, or its option removed) is sent as `null`, and the field lists those items in `omitted`; Daymark keeps the value. |
 
-`inMilestone`, `container`, `items: true`, `unit`, `source.managedBy` and the list's `readonly` go beyond the
+`inMilestone`, `container`, `items: true`, `unit`, `omitted`, `source.managedBy` and the list's `readonly` go beyond the
 base protocol; a reader may ignore them. Roll-ups (progress, health, milestone and
 parent summaries) are not part of the protocol; read them from Daymark itself
 (`daymark plan`, `GET /v1/projects/{id}/plan`).
@@ -197,7 +221,10 @@ parent summaries) are not part of the protocol; read them from Daymark itself
 Writing `start` or `end` sets Daymark's movable dates (`planned`, `latest_target`)
 and never its hard `deadline`. Only the dates a change sets are checked: a start
 after an end is refused with `invalid`, never adjusted. A date written back
-unchanged leaves the stored value, and its time of day, alone.
+unchanged leaves the stored value, and its time of day, alone. `start: null`
+clears both dates a start reads from (`planned` and `earliest_start`). `end: null`
+clears `latest_target`; a deadline still shows through as the end, and is cleared
+only by `deadline: null`.
 
 ## Read-only projects
 
