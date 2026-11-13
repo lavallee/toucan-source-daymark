@@ -1,0 +1,272 @@
+"""toucan-source-daymark, run as a separate process through its installed entry point
+against temporary databases. All records are synthetic.
+"""
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from daymark import Store, Tasks
+
+NOW = datetime(2030, 4, 3, 15, 0, tzinfo=UTC)
+ZONE = "Europe/London"
+BOARD = "todo:To do:open:grey,doing:Doing:open:blue,done:Done:completed:green"
+ADAPTER = Path(sys.executable).parent / "toucan-source-daymark"
+
+
+@pytest.fixture
+def db(tmp_path):
+    path = tmp_path / "daymark.sqlite3"
+    store = Store(path)
+    tasks = Tasks(store, "home", actor="setup", timezone=ZONE, now=NOW)
+    tasks.add("Ada", kind="person", id="ada")
+    tasks.add("Urgent", kind="label", id="urgent")
+    tasks.goal("Launch", id="launch", target="2030-06-01")
+    tasks.project("Website relaunch", id="site", stages=BOARD, description="The new site",
+                  types="epic:Epic:violet:container,story:Story:blue",
+                  fields="points:Points:number,risk:Risk:option:low|high")  # fmt: skip
+    tasks.add("Elsewhere", id="ext")
+    tasks.add("Beta", id="beta", project="site", is_milestone=True, due="2030-05-01 17:30")
+    tasks.add("Sitemap", id="map", project="site", plan="2030-04-10", target="2030-04-20",
+              assignee="ada", after="ext", type="story", milestone="beta",
+              values={"points": 3, "risk": "low"})  # fmt: skip
+    tasks.add("Copy", id="copy", project="site", after="map", due="2030-05-01",
+              start="2030-04-15")  # fmt: skip
+    tasks.propose("Compare hosts", id="idea", project="site")
+    tasks.project("Commitments", id="rev-commitments", managed_by="rev")
+    tasks.add("Projected", id="projected", project="rev-commitments")
+    Tasks(store, "studio", timezone=ZONE, now=NOW).project("Album", id="album")
+    store.close()
+    return path
+
+
+def run(db, *args, stdin=None, env=None):
+    environment = {**os.environ, "DAYMARK_DB": str(db), "DAYMARK_TZ": ZONE, **(env or {})}
+    process = subprocess.run(
+        [str(ADAPTER), *args],
+        input=json.dumps(stdin) if stdin is not None else "",
+        capture_output=True,
+        check=False,
+        text=True,
+        env=environment,
+        timeout=60,
+    )
+    out = json.loads(process.stdout) if process.returncode == 0 else None
+    err = json.loads(process.stderr) if process.returncode else None
+    return process.returncode, out, err
+
+
+def write(db, *changes):
+    status, out, err = run(db, "write", "home/site", stdin={"changes": list(changes)})
+    assert status == 0, err
+    return out, {r["mutation"]: r for r in out["results"]}
+
+
+def head(db):
+    store = Store(db)
+    try:
+        return store.head("home")
+    finally:
+        store.close()
+
+
+def task(db, id):
+    store = Store(db)
+    try:
+        return store.get("home", id)
+    finally:
+        store.close()
+
+
+def test_list_and_read(db):
+    status, out, _ = run(db, "list")
+    assert status == 0
+    assert out == {"sources": [
+        {"ref": "home/rev-commitments", "title": "Commitments", "readonly": True,
+         "description": "Daymark project in workspace home"},
+        {"ref": "home/site", "title": "Website relaunch", "readonly": False,
+         "description": "The new site"},
+        {"ref": "studio/album", "title": "Album", "readonly": False,
+         "description": "Daymark project in workspace studio"},
+    ]}  # fmt: skip
+    status, plan, _ = run(db, "read", "home/site")
+    assert status == 0 and plan["plan"] == 1 and plan["cursor"] == str(head(db))
+    fields = {f["id"]: f for f in plan["fields"]}
+    assert fields["stage"]["options"][-1] == {"id": "done", "label": "Done", "color": "green",
+                                              "done": True}  # fmt: skip
+    assert fields["parent"]["label"] == "Epic"
+    assert fields["type"]["options"] == [{"id": "epic", "label": "Epic", "color": "violet"},
+                                         {"id": "story", "label": "Story", "color": "blue"}]  # fmt: skip
+    assert fields["milestone"]["options"] == [{"id": "beta", "label": "Beta"}]
+    assert fields["goal"]["options"] == [{"id": "launch", "label": "Launch"}]
+    assert fields["field:points"] == {"id": "field:points", "label": "Points", "type": "number",
+                                      "writable": True}  # fmt: skip
+    assert fields["field:risk"]["options"] == [{"id": "low", "label": "low"},
+                                               {"id": "high", "label": "high"}]  # fmt: skip
+    assert fields["status"]["writable"] is False
+    items = {i["id"]: i for i in plan["items"]}
+    assert list(items) == ["beta", "map", "copy"]  # Order; the proposal is not work yet.
+    assert items["map"] == {
+        "id": "map", "version": 1, "title": "Sitemap", "detail": None, "stage": "todo",
+        "assignee": "ada", "start": "2030-04-10", "end": "2030-04-20", "deadline": None,
+        "priority": None, "labels": [], "dependsOn": [], "parent": None, "milestone": "beta",
+        "isMilestone": False, "goal": None, "type": "story", "done": False, "estimate": None,
+        "url": None, "status": "open", "field:points": 3, "field:risk": "low",
+    }  # fmt: skip
+    assert items["beta"]["isMilestone"] is True and items["copy"]["dependsOn"] == ["map"]
+    assert (items["copy"]["start"], items["copy"]["end"]) == ("2030-04-15", "2030-05-01")
+    plain = Store(db)
+    Tasks(plain, "home", timezone=ZONE, now=NOW).project("Bare", id="bare")
+    plain.close()
+    bare = {f["id"] for f in run(db, "read", "home/bare")[1]["fields"]}
+    assert "type" not in bare and not any(f.startswith("field:") for f in bare)
+
+
+def test_write_changes_conflict_and_replay(db):
+    cursor = run(db, "read", "home/site")[1]["cursor"]
+    assert run(db, "changes", "home/site", "--after", cursor)[1] == {
+        "cursor": cursor, "changed": False}  # fmt: skip
+    changes = [
+        {"op": "update", "id": "map", "version": 1, "mutation": "m-1",
+         "set": {"stage": "done", "end": "2030-04-22", "labels": ["urgent"], "priority": "2",
+                 "dependsOn": [], "field:points": 5, "field:risk": None, "goal": "launch"},
+         "place": {"after": "copy"}},
+        {"op": "create", "mutation": "m-2", "set": {"title": "New card", "stage": "doing",
+                                                    "assignee": "ada", "estimate": 90,
+                                                    "type": "epic", "milestone": "beta"},
+         "place": {"after": None}},
+        {"op": "update", "id": "copy", "version": 7, "mutation": "m-3", "set": {"title": "x"}},
+        {"op": "update", "id": "copy", "version": 1, "mutation": "m-4",
+         "set": {"url": "https://example.invalid"}},
+        {"op": "update", "id": "nope", "version": 1, "mutation": "m-5", "set": {"title": "x"}},
+        {"op": "update", "id": "copy", "version": 1, "mutation": "m-6",
+         "set": {"field:points": "many"}},
+    ]  # fmt: skip
+    out, results = write(db, *changes)
+    item = results["m-1"]["item"]
+    assert results["m-1"]["ok"] and item["stage"] == "done" and item["done"] is True
+    assert (item["start"], item["end"], item["goal"]) == ("2030-04-10", "2030-04-22", "launch")
+    assert item["field:points"] == 5 and item["field:risk"] is None
+    assert item["labels"] == ["urgent"] and item["priority"] == "2"
+    created = results["m-2"]["item"]
+    assert (created["stage"], created["type"], created["milestone"]) == ("doing", "epic", "beta")
+    assert results["m-3"]["error"] == "conflict" and results["m-3"]["item"]["version"] == 1
+    assert results["m-4"]["error"] == "invalid" and results["m-4"]["item"]["id"] == "copy"
+    assert results["m-5"]["error"] == "not_found" and "item" not in results["m-5"]
+    assert results["m-6"]["error"] == "invalid" and "number" in results["m-6"]["message"]
+    assert out["cursor"] == str(head(db))
+    after = run(db, "read", "home/site")[1]
+    assert [i["id"] for i in after["items"]] == [created["id"], "beta", "copy", "map"]
+    stored = task(db, "map")
+    assert stored["depends_on"] == ["ext"]  # The dependency outside the plan survives.
+    assert stored["deadline"] is None and stored["values"] == {"points": 5}
+    store = Store(db)
+    assert {e["actor"] for e in store.events("home", after=int(cursor))} == {"toucan"}
+    # Placing a card wrote only that card: copy and beta kept their versions.
+    assert store.get("home", "copy")["version"] == 1 and store.get("home", "beta")["version"] == 1
+    store.close()
+    assert run(db, "changes", "home/site", "--after", cursor)[1]["changed"] is True
+    # Replaying the same changes writes nothing and answers with the current items.
+    again, replayed = write(db, *changes)
+    assert again["cursor"] == after["cursor"]
+    assert replayed["m-1"]["ok"] and replayed["m-1"]["item"] == item
+    assert replayed["m-2"]["item"]["id"] == created["id"]
+    # The same mutation with a different change is a conflict, not a silent replay.
+    _, reused = write(db, {**changes[0], "set": {"title": "Something else"}})
+    assert reused["m-1"]["error"] == "conflict" and task(db, "map")["title"] == "Sitemap"
+
+
+def test_mutations_are_scoped_to_their_project(db):
+    store = Store(db)
+    Tasks(store, "home", timezone=ZONE, now=NOW).project("Other", id="other")
+    store.close()
+    change = {"op": "create", "mutation": "same", "set": {"title": "Here"}}
+    _, first = write(db, change)
+    status, out, _ = run(db, "write", "home/other", stdin={"changes": [change]})
+    other = out["results"][0]
+    assert status == 0 and other["ok"] and other["item"]["id"] != first["same"]["item"]["id"]
+    assert task(db, other["item"]["id"])["project_id"] == "other"
+
+
+def test_dates_only_checked_when_written_and_deadlines_keep_their_time(db):
+    # Copy starts 2030-04-15 (not before) and ends at its deadline 2030-05-01; push its
+    # plan past the deadline through Daymark itself, then edit only the title.
+    store = Store(db)
+    Tasks(store, "home", timezone=ZONE, now=NOW).edit("copy", plan="2030-05-10")
+    store.close()
+    _, results = write(db, {"op": "update", "id": "copy", "version": 2, "mutation": "t",
+                            "set": {"title": "Copy v2"}})  # fmt: skip
+    assert results["t"]["ok"] and results["t"]["item"]["title"] == "Copy v2"
+    _, results = write(db, {"op": "update", "id": "copy", "version": 3, "mutation": "e",
+                            "set": {"end": "2030-05-02"}})  # fmt: skip
+    assert (
+        results["e"]["error"] == "invalid" and "start is after the end" in results["e"]["message"]
+    )
+    # Writing a timed deadline's own date back leaves it, and its time, untouched.
+    _, results = write(db, {"op": "update", "id": "beta", "version": 1, "mutation": "d",
+                            "set": {"deadline": "2030-05-01", "title": "Beta!"}})  # fmt: skip
+    assert task(db, "beta")["deadline"]["at"].startswith("2030-05-01T17:30")
+    _, results = write(db, {"op": "update", "id": "beta", "version": 2, "mutation": "d2",
+                            "set": {"deadline": "2030-05-03"}})  # fmt: skip
+    assert task(db, "beta")["deadline"]["at"].startswith("2030-05-03T17:30")
+    # Moving the plan's end never moves the deadline.
+    _, results = write(db, {"op": "update", "id": "beta", "version": 3, "mutation": "d3",
+                            "set": {"end": "2030-04-30"}})  # fmt: skip
+    assert results["d3"]["item"]["deadline"] == "2030-05-03"
+    assert results["d3"]["item"]["end"] == "2030-04-30"
+
+
+def test_read_only_projects_refuse_writes(db):
+    status, plan, _ = run(db, "read", "home/rev-commitments")
+    assert plan["source"]["readonly"] is True and plan["source"]["managedBy"] == "rev"
+    assert not any(f["writable"] for f in plan["fields"])
+    status, _, err = run(db, "write", "home/rev-commitments", stdin={"changes": [
+        {"op": "update", "id": "projected", "version": 1, "mutation": "r-1",
+         "set": {"title": "Edited"}}]})  # fmt: skip
+    assert status == 7 and err["error"] == "forbidden"
+    assert task(db, "projected")["title"] == "Projected"
+
+
+def test_failures_are_coded_json_on_standard_error(db, tmp_path):
+    assert run(db, "read", "home/missing")[0:3:2] == (3, {"error": "not_found",
+                                                          "message": "No such project"})  # fmt: skip
+    assert run(db, "read", "studio/site")[2]["error"] == "not_found"  # Workspaces stay apart.
+    assert run(db, "read", "no-slash")[2]["error"] == "invalid"
+    assert run(db, "changes", "home/site", "--after", "x")[2]["error"] == "invalid"
+    assert run(db, "changes", "home/site")[2]["error"] == "invalid"
+    assert run(db, "frobnicate")[2]["error"] == "invalid"
+    assert run(db, "write", "home/site", stdin=[1])[2]["error"] == "invalid"
+    _, out, _ = run(db, "write", "home/site", stdin={"changes": [{"op": "delete"}]})
+    assert out["results"][0]["error"] == "invalid"
+    missing = tmp_path / "absent.sqlite3"
+    assert run(missing, "list") == (0, {"sources": []}, None)
+    assert run(missing, "read", "home/site")[2]["error"] == "unavailable"
+    assert not missing.exists()  # The adapter never creates a database.
+    help_text = subprocess.run([str(ADAPTER)], capture_output=True, check=False, text=True)
+    assert "toucan.plan/1" in help_text.stdout
+
+
+def test_an_older_database_is_reported_not_upgraded(db, tmp_path):
+    old = tmp_path / "old.sqlite3"
+    connection = sqlite3.connect(old)
+    connection.executescript((Path(__file__).parent / "fixtures" / "daymark-0.3.0.sql").read_text())
+    connection.commit()
+    connection.close()
+    for args in (("list",), ("read", "home/garden"), ("changes", "home/garden", "--after", "0")):
+        status, _, err = run(old, *args)
+        assert status == 1 and err["error"] == "unavailable" and "0.4.0" in err["message"]
+    check = sqlite3.connect(old)
+    assert check.execute("SELECT value FROM daymark_scheduler WHERE key='schema'").fetchone() == (
+        "4",
+    )
+    check.close()
+
+
+def test_the_entry_point_reports_its_version():
+    out = subprocess.run([str(ADAPTER), "--version"], capture_output=True, check=False, text=True)
+    assert out.stdout.strip() == "toucan-source-daymark 0.1.0"
