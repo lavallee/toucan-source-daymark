@@ -284,6 +284,8 @@ def _translate(changes, task, members, view):
         elif key in {"stage", "assignee", "parent", "inMilestone", "goal", "type"}:
             if value is not None and not isinstance(value, str):
                 raise Failure("invalid", f"{key} is an option id or null")
+            if key == "parent" and value is not None and value not in members:
+                raise Failure("invalid", "parent must be an item of this plan")
             target = {"stage": "stage", "assignee": "assignee_id", "parent": "parent_id",
                       "inMilestone": "milestone_id", "goal": "goal_id", "type": "type"}[key]  # fmt: skip
             out[target] = value
@@ -303,6 +305,8 @@ def _translate(changes, task, members, view):
             if key == "labels":
                 out["label_ids"] = list(dict.fromkeys(value))
             else:
+                if set(value) - members:
+                    raise Failure("invalid", "dependsOn lists items of this plan only")
                 # The plan shows only dependencies inside the project; keep the others.
                 outside = [r for r in (task or {}).get("depends_on", []) if r not in members]
                 out["depends_on"] = list(dict.fromkeys([*outside, *value]))
@@ -323,9 +327,42 @@ def _translate(changes, task, members, view):
         # Only the dates this change sets are checked, and precision is kept.
         out.update(plans.schedule(task, timezone=local_timezone(), **dates))
     if values:
-        merged = {**((task or {}).get("values") or {}), **values}
-        out["values"] = {k: v for k, v in merged.items() if v is not None}
+        out["values"] = values  # Daymark merges per field; null clears one.
+    return _changed(out, task, view) if task is not None else out
+
+
+def _changed(payload, task, view):
+    """Only what differs from the task as it stands: a change that changes nothing
+    writes nothing."""
+    out = {}
+    for key, value in payload.items():
+        if key == "stage":
+            current = plans.resolve_stage(task, view["stages"])
+            if value is not None and current is not None and current["id"] == value:
+                continue
+        elif key == "values":
+            merged = {**task["values"], **value}
+            if {k: v for k, v in merged.items() if v is not None} == task["values"]:
+                continue
+            value = {k: v for k, v in value.items() if task["values"].get(k) != v}
+        elif task.get(key) == value:
+            continue
+        out[key] = value
     return out
+
+
+def _in_place(store, workspace, project_id, id, place):
+    """Whether an item already sits where ``place`` would put it."""
+    order = [c["id"] for c in store.plan(workspace, project_id)["tasks"]]
+    if id not in order:
+        return False
+    i = order.index(id)
+    key, ref = next(iter(place.items()))
+    if key == "after":
+        return order[i - 1] == ref if ref is not None and i > 0 else ref is None and i == 0
+    if ref is None:
+        return i == len(order) - 1
+    return i + 1 < len(order) and order[i + 1] == ref
 
 
 def _short_id(workspace, project_id, mutation):
@@ -383,21 +420,26 @@ def _apply(store, workspace, project_id, change, members, view, actor):
             task = None
         if task is None or task["kind"] != "task" or task["project_id"] != project_id:
             raise Failure("not_found", "No such item in this plan")
+        if id not in members:
+            # Proposed, archived, or cancelled off the board: not an item of the plan.
+            raise Failure(
+                "not_found", "Not an item of this plan (proposed, archived or off the board)"
+            )
         try:
             payload = _translate(change.get("set") or {}, task, members, view)
         except DomainError as exc:
             raise Failure("invalid", str(exc), id) from None
         except Failure as failure:
             raise Failure(failure.code, str(failure), id) from None
+        if place is not None and _in_place(store, workspace, project_id, id, place):
+            place = None  # Already there.
         operations = []
         if payload:
             operations.append({"operation_id": request_id + ":1", "action": "update",
                                "payload": {"id": id, **payload}, "expected_version": version})  # fmt: skip
             version += 1
         if not operations and place is None:
-            if task["version"] != version:
-                raise Failure("conflict", "Changed upstream", id)
-            return id
+            return id  # Nothing to change: nothing written, the item as it stands.
     else:
         raise Failure("invalid", "op is update or create")
     if place is not None:
@@ -416,6 +458,7 @@ def _apply(store, workspace, project_id, change, members, view, actor):
         error = next(r["error"] for r in result["results"] if r["error"]["code"] != "aborted")
         code = error["code"] if error["code"] in CODES else "invalid"
         raise Failure(code, error["message"] if code != "conflict" else "Changed upstream", id)
+    members.add(id)  # A new item can be named by later changes in the same write.
     return result["results"][0]["result"]["id"]
 
 
