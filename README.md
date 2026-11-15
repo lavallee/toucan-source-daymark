@@ -16,9 +16,9 @@ dropped between two others sets its place in the project's order.
 
 ## Install
 
-It needs Python 3.11 or newer and toucan 0.15.0 or newer (the first release with plan sources). **This release, 0.1.0, works with Daymark 0.4.0**:
-it installs `daymark-core` pinned to the `v0.4.0` tag, and reads and writes
-databases at Daymark 0.4.0's schema (schema 5).
+It needs Python 3.11 or newer and toucan 0.15.0 or newer (the first release with plan sources). **This release, 0.1.1, works with Daymark 0.5.0**:
+it installs `daymark-core` pinned to the `v0.5.0` tag, and reads and writes
+databases at Daymark 0.5.0's schema (schema 6).
 
 ```sh
 uv tool install "toucan-source-daymark @ git+https://github.com/lavallee/toucan-source-daymark"
@@ -36,8 +36,8 @@ It never creates a database and never upgrades one, and it never downgrades one.
 A database that a newer Daymark has upgraded answers `unavailable` with a message
 naming the Daymark it needs: install the adapter release made for that Daymark.
 A database still at an older schema answers `unavailable` too: open it once with
-your `daymark` command (0.4.0) to upgrade it, after taking a backup. If the
-`daymark-core` it finds is older than 0.4.0, it answers `unavailable` naming the
+your `daymark` command (0.5.0) to upgrade it, after taking a backup. If the
+`daymark-core` it finds is older than 0.5.0, it answers `unavailable` naming the
 version it needs.
 
 Upgrade Daymark and the adapter together, so they agree on the schema:
@@ -236,7 +236,7 @@ writable, and refuses writes to it with `forbidden`. Mark one with
 ## Development
 
 ```sh
-uv sync --dev                # resolves daymark-core from its v0.4.0 tag
+uv sync --dev                # resolves daymark-core from its v0.5.0 tag
 uv run pytest -q
 uv run ruff check src tests && uv run ruff format --check src tests
 ```

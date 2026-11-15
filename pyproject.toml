@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "toucan-source-daymark"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Daymark project as a toucan plan source: boards, gantts and tables that write back"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "Marc Lavallee"}]
 dependencies = [
-    "daymark-core @ git+https://github.com/lavallee/daymark@v0.4.0",
+    "daymark-core @ git+https://github.com/lavallee/daymark@v0.5.0",
 ]
 
 [project.scripts]
