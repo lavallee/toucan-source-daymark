@@ -2,6 +2,12 @@
 
 Changes are recorded here using semantic versions.
 
+## [0.1.1] - 2026-11-15
+
+### Changed
+
+- Requires `daymark-core` 0.5.0 and reads and writes databases at its schema (schema 6). A database still at an older schema answers `unavailable` and names the release that upgrades it, as before. No change to the wire format.
+
 ## [0.1.0] - 2026-11-13
 
 ### Added

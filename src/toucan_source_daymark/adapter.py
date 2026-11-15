@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-NEEDS = "0.4.0"  # The daymark-core release this adapter release works with.
+NEEDS = "0.5.0"  # The daymark-core release this adapter release works with.
 
 try:
     from daymark import DomainError, Store, plans
