@@ -267,7 +267,7 @@ def test_an_older_database_is_reported_not_upgraded(db, tmp_path):
     connection.close()
     for args in (("list",), ("read", "home/garden"), ("changes", "home/garden", "--after", "0")):
         status, _, err = run(old, *args)
-        assert status == 1 and err["error"] == "unavailable" and "0.5.0" in err["message"]
+        assert status == 1 and err["error"] == "unavailable" and "schema 6" in err["message"]
     check = sqlite3.connect(old)
     assert check.execute("SELECT value FROM daymark_scheduler WHERE key='schema'").fetchone() == (
         "4",
@@ -277,7 +277,7 @@ def test_an_older_database_is_reported_not_upgraded(db, tmp_path):
 
 def test_the_entry_point_reports_its_version():
     out = subprocess.run([str(ADAPTER), "--version"], capture_output=True, check=False, text=True)
-    assert out.stdout.strip() == "toucan-source-daymark 0.1.1"
+    assert out.stdout.strip() == "toucan-source-daymark 0.1.2"
 
 
 def test_milestone_marker_membership_and_containers(db):
@@ -551,4 +551,4 @@ def test_a_daymark_too_old_for_this_adapter_is_named(tmp_path):
                              check=False)  # fmt: skip
     error = json.loads(process.stderr)
     assert process.returncode == 1 and error["error"] == "unavailable"
-    assert "needs daymark-core 0.5.0" in error["message"]
+    assert "needs daymark-core 0.6.0" in error["message"]

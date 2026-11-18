@@ -36,8 +36,8 @@ wheels = [
 
 [[package]]
 name = "daymark-core"
-version = "0.5.0"
-source = { git = "https://github.com/lavallee/daymark?rev=v0.5.0#0ec6c67ccc6f7c1777dbc1be4a13f03fd1263084" }
+version = "0.6.0"
+source = { git = "https://github.com/lavallee/daymark?rev=v0.6.0#3eec3f3f710e4347321d8c99599c12700d16e6ad" }
 dependencies = [
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -304,7 +304,7 @@ wheels = [
 
 [[package]]
 name = "toucan-source-daymark"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "daymark-core" },
@@ -318,7 +318,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "daymark-core", git = "https://github.com/lavallee/daymark?rev=v0.5.0" }]
+requires-dist = [{ name = "daymark-core", git = "https://github.com/lavallee/daymark?rev=v0.6.0" }]
 
 [package.metadata.requires-dev]
 dev = [
