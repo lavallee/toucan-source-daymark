@@ -2,6 +2,10 @@
 
 Changes are recorded here using semantic versions.
 
+## [0.1.2] - 2026-11-18
+
+- Upgrade to Daymark 0.6.0. The adapter still uses schema 6 and the same Toucan plan protocol.
+
 ## [0.1.1] - 2026-11-15
 
 ### Changed
